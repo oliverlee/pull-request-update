@@ -1,0 +1,121 @@
+name: pull-request-update
+
+on:
+  push:
+    branches: [ main ]
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  update-stacked:
+    runs-on: ubuntu-latest
+    permissions: { id-token: write }
+    steps:
+    - uses: actions/create-github-app-token@v1
+      id: app-token
+      with:
+        app-id: ${{ vars.PR_UPDATE_BOT_APPID }}
+        private-key: ${{ secrets.PR_UPDATE_BOT_PRIVATE_KEY }}
+
+    - name: checkout calling repo
+      uses: actions/checkout@v4
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+
+    # https://github.com/orgs/community/discussions/31054
+    - name: get job workflow ref
+      uses: ChristopherHX/oidc@v3
+      id: oidc
+
+    - name: checkout workflow repo
+      uses: actions/checkout@v4
+      with:
+        path: .github/pull-request-update
+        repository: ${{ steps.oidc.outputs.job_workflow_repo_name_and_owner }}
+        ref: ${{ inputs.github_tooling_commit || steps.oidc.outputs.job_workflow_repo_ref }}
+        token: ${{ steps.app-token.outputs.token }}
+
+    - name: update stacked pull requests
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      shell: bash
+      run: |
+        set -a
+        source .github/pull-request-update/pull-request-update-utils.bash
+        default_branch=${{ github.event.repository.default_branch }}
+
+        git fetch origin "$default_branch" --depth 1 --quiet
+
+        base_change_id=$(\
+          gh_api --jq ".commit.message" "/repos/${{ github.repository }}/commits/${default_branch}" \
+          | grep "Change-Id:" \
+          | cut -d' ' -f2)
+
+        pull_requests_with_base "$base_change_id" \
+          | xargs -I {} bash -c '\
+            set -euo pipefail; \
+            echo "updating PR {}";  \
+            try_update_with "{}" "origin/${default_branch}" '
+
+  update-out-of-date:
+    runs-on: ubuntu-latest
+    permissions: { id-token: write }
+    steps:
+    - uses: actions/create-github-app-token@v1
+      id: app-token
+      with:
+        app-id: ${{ vars.PR_UPDATE_BOT_APPID }}
+        private-key: ${{ secrets.PR_UPDATE_BOT_PRIVATE_KEY }}
+
+    - name: checkout calling repo
+      uses: actions/checkout@v4
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+
+    # https://github.com/orgs/community/discussions/31054
+    - name: get job workflow ref
+      uses: ChristopherHX/oidc@v3
+      id: oidc
+
+    - name: checkout workflow repo
+      uses: actions/checkout@v4
+      with:
+        path: .github/pull-request-update
+        repository: ${{ steps.oidc.outputs.job_workflow_repo_name_and_owner }}
+        ref: ${{ inputs.github_tooling_commit || steps.oidc.outputs.job_workflow_repo_ref }}
+        token: ${{ steps.app-token.outputs.token }}
+
+    - name: update out of date pull requests
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      shell: bash
+      run: |
+        set -a
+        source .github/pull-request-update/pull-request-update-utils.bash
+        default_branch=${{ github.event.repository.default_branch }}
+
+        git fetch origin "$default_branch" --depth 1 --quiet
+
+        head_commit=$(gh_api --jq ".sha" "/repos/${{ github.repository }}/commits/${default_branch}")
+
+        function update
+        {
+          number="$1"
+          echo -n "checking if PR $number is up to date "
+
+          pr_head_commit=$(gh pr view $number --json commits --jq ".commits | last | .oid")
+          pr_status=$(gh_api --jq ".status" /repos/${{ github.repository }}/compare/$head_commit...$pr_head_commit)
+
+          if [[ "$pr_status" == "ahead" ]]; then
+            echo "✅"
+          else
+            echo "";
+            try_update_with "$number" "origin/${default_branch}"
+          fi
+
+        }
+
+        pull_requests_with_base "$default_branch" \
+          | xargs -I {} bash -c '\
+            set -euo pipefail; \
+            update "{}" '
