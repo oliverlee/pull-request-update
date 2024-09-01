@@ -44,7 +44,7 @@ git merge-base --is-ancestor $tail $head
 
 repo=$(git rev-parse --show-toplevel)
 
-commits=($(git rev-list --ancestry-path ${tail}..${head} | tac))
+commits=($(git rev-list --ancestry-path ${tail}..${head} | tail -r))
 
 for commit in "${commits[@]}"; do
   if ! pr_branch $commit >/dev/null ; then
